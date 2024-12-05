@@ -1,4 +1,161 @@
 //Arduino UNO
+#include <SPI.h>
+#include <MFRC522.h>
+
+#define SS_PIN 10    // Pin para el SS (Slave Select)
+#define RST_PIN 9    // Pin para el RST (Reset)
+
+// Inicializa una instancia de MFRC522
+MFRC522 rfid(SS_PIN, RST_PIN);
+
+void setup() {
+  Serial.begin(9600);   // Inicia la comunicación serie
+  SPI.begin();           // Inicia el bus SPI
+  rfid.PCD_Init();       // Inicializa el módulo RFID-RC522
+  Serial.println("Escaneando tarjetas...");
+}
+
+void loop() {
+  // Verifica si hay una tarjeta cerca del lector
+  if (!rfid.PICC_IsNewCardPresent() || !rfid.PICC_ReadCardSerial()) {
+    delay(500);  // Si no hay tarjeta, espera un poco antes de volver a escanear
+    return;
+  }
+
+  // Imprime el UID de la tarjeta
+  Serial.print("UID de la tarjeta: ");
+  for (byte i = 0; i < rfid.uid.size; i++) {
+    Serial.print(rfid.uid.uidByte[i] < 0x10 ? " 0" : " ");
+    Serial.print(rfid.uid.uidByte[i], HEX);
+  }
+  Serial.println();
+
+  rfid.PICC_HaltA(); // Detiene la tarjeta
+}
 
 
 //ESP32
+#include <SPI.h>                  // Incluye la biblioteca SPI para la comunicación RFID
+#include <MFRC522.h>              // Incluye la biblioteca MFRC522 para el lector RFID
+#include <Wire.h>                 // Incluye la biblioteca Wire para la comunicación I2C
+#include <LiquidCrystal_I2C.h>    // Incluye la biblioteca LiquidCrystal_I2C para la pantalla LCD
+#include <WiFi.h>                 // Incluye la biblioteca WiFi para la comunicación MQTT (ESP32)
+#include <PubSubClient.h>         // Incluye la biblioteca PubSubClient para la comunicación MQTT
+
+// Credenciales de Wi-Fi
+const char* ssid = "";               // Reemplazar con el nombre de tu red Wi-Fi
+const char* password = "";      // Reemplazar con la contraseña de tu red Wi-Fi
+
+// Detalles del broker MQTT
+const char* mqtt_server = ""; // Reemplazar con la dirección de tu broker MQTT
+const int mqtt_port = 1883;                    // Puerto del broker MQTT
+const char* mqtt_topic = ""; // Tópico MQTT para publicar el UID
+
+WiFiClient espClient;                         // Crea un cliente Wi-Fi
+PubSubClient client(espClient);               // Crea una instancia de PubSubClient
+
+// Pines para RFID
+#define SS_PIN 5                 // Define el pin Slave Select para el lector RFID
+#define RST_PIN 2                // Define el pin Reset para el lector RFID
+
+MFRC522 rfid(SS_PIN, RST_PIN);   // Crea una instancia MFRC522 con los pines definidos
+
+// Dirección I2C de la pantalla LCD (típicamente 0x27 o 0x3F)
+LiquidCrystal_I2C lcd(0x27, 16, 2); // Crea una instancia de LCD con dirección I2C 0x27, 16 columnas y 2 filas
+
+void setup() {
+  Serial.begin(9600);             // Inicia la comunicación serial a 9600 baudios
+
+  // Inicializa el lector RFID
+  SPI.begin();                    // Inicia el bus SPI
+  rfid.PCD_Init();                // Inicializa el módulo RFID MFRC522
+
+  // Inicializa la pantalla LCD
+  lcd.init();                     // Inicializa la pantalla LCD
+  lcd.backlight();                // Enciende la luz de fondo de la LCD
+  lcd.clear();                    // Limpia la pantalla LCD
+  lcd.setCursor(0, 0);            // Coloca el cursor en la primera fila y columna
+  lcd.print("Obetiendo UID Tag");   // Muestra un mensaje inicial en la LCD
+
+  // Conexión a Wi-Fi
+  WiFi.begin(ssid, password);     // Inicia la conexión Wi-Fi
+  lcd.setCursor(0, 1);
+  lcd.print("Conectando WiFi");
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  lcd.clear();
+  lcd.print("WiFi Conectado");
+  delay(2000);
+
+  // Inicializa MQTT
+  client.setServer(mqtt_server, mqtt_port);
+  connectToMQTT();
+}
+
+void loop() {
+  // Reconexión a MQTT si es necesario
+  if (!client.connected()) {
+    connectToMQTT();
+  }
+  client.loop();
+
+  // Busca nuevas tarjetas RFID
+  if (!rfid.PICC_IsNewCardPresent() || !rfid.PICC_ReadCardSerial()) {
+    return;                       // Si no hay nuevas tarjetas, salir del bucle
+  }
+
+  // Muestra el UID en el monitor serial
+  Serial.print("UID tag: ");
+  String content = "";            // Crea una cadena para almacenar el contenido del UID
+  for (byte i = 0; i < rfid.uid.size; i++) {
+    Serial.print(rfid.uid.uidByte[i] < 0x10 ? " 0" : " ");
+    Serial.print(rfid.uid.uidByte[i], HEX); // Imprime cada byte del UID en formato HEX
+    content.concat(String(rfid.uid.uidByte[i] < 0x10 ? " 0" : " "));
+    content.concat(String(rfid.uid.uidByte[i], HEX)); // Añade cada byte a la cadena de contenido
+  }
+  Serial.println();
+  Serial.println();
+
+  // Muestra el UID en la pantalla LCD
+  lcd.clear();                    // Limpia la pantalla LCD
+  lcd.setCursor(0, 0);            // Coloca el cursor en la primera fila y columna
+  lcd.print("RFID UID:");         // Muestra el mensaje en la pantalla LCD
+  lcd.setCursor(0, 1);            // Coloca el cursor en la segunda fila
+  lcd.print(content);             // Muestra el contenido del UID en la pantalla LCD
+
+  // Envía el UID al broker MQTT
+  if (client.publish(mqtt_topic, content.c_str())) {
+    Serial.println("UID enviado a MQTT");
+  } else {
+    Serial.println("Error al enviar UID a MQTT");
+  }
+
+  delay(2000);                    // Mantiene la pantalla durante 2 segundos
+
+  // Detiene el PICC
+  rfid.PICC_HaltA();              // Detiene la tarjeta
+}
+
+void connectToMQTT() {
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Conectando MQTT");
+  while (!client.connected()) {
+    Serial.print("Conectando a MQTT...");
+    if (client.connect("")) { // Reemplazar con un ID único para el cliente
+      Serial.println("Conectado");
+      lcd.setCursor(0, 1);
+      lcd.print("MQTT Conectado");
+    } else {
+      Serial.print("Error, rc=");
+      Serial.print(client.state());
+      delay(2000);
+    }
+  }
+  delay(2000);
+  lcd.clear();
+}
+
+
